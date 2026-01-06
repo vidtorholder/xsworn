@@ -64,6 +64,9 @@ header {
     border-bottom: 2px solid var(--border);
     padding: 14px;
     box-shadow: 0 0 30px #000;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
 }
 
 header h1 {
@@ -74,6 +77,7 @@ header h1 {
     text-shadow:
         0 0 5px var(--glow),
         0 0 15px rgba(58,92,255,.8);
+    cursor: pointer;
 }
 
 #userStatus {
@@ -121,6 +125,7 @@ button:hover {
 /* ---------- POSTS ---------- */
 .post {
     display: flex;
+    flex-direction: row;
     margin: 14px;
     background: linear-gradient(#10163a, #0b0e1e);
     border: 1px solid var(--border);
@@ -128,6 +133,7 @@ button:hover {
         inset 0 0 18px rgba(122,162,255,.07),
         0 0 18px rgba(58,92,255,.18);
     animation: glowpulse 6s infinite alternate;
+    border-radius: 6px;
 }
 
 @keyframes glowpulse {
@@ -174,6 +180,18 @@ button:hover {
     font-size: 12px;
 }
 
+/* ---------- POST FLAIR / COMMUNITY ---------- */
+.community {
+    display: inline-block;
+    background: #0b0e1e;
+    border: 1px solid var(--border);
+    padding: 1px 5px;
+    margin-left: 6px;
+    font-size: 10px;
+    color: var(--accent);
+    border-radius: 4px;
+}
+
 /* ---------- FOOTER GLOW ---------- */
 footer {
     text-align: center;
@@ -188,10 +206,11 @@ footer {
 <body>
 
 <header>
-    <h1>XSWARM</h1>
+    <h1 onclick="window.scrollTo(0,0)">XSWARM</h1>
     <div id="userStatus">connecting…</div>
 </header>
 
+<!-- ---------- AUTH PANEL ---------- -->
 <div id="auth" class="panel">
     <h3>Access Node</h3>
     <input id="username" placeholder="username">
@@ -201,24 +220,27 @@ footer {
     <button onclick="login()">Login</button>
 </div>
 
+<!-- ---------- POST CREATION PANEL ---------- -->
 <div id="postBox" class="panel" style="display:none;">
     <h3>Create Transmission</h3>
     <input id="postTitle" placeholder="title">
+    <input id="postCommunity" placeholder="community / flair">
     <textarea id="postBody" placeholder="content"></textarea>
     <button onclick="createPost()">Transmit</button>
 </div>
 
+<!-- ---------- FEED ---------- -->
 <div id="feed"></div>
 
 <footer>
     XSWARM // cached forever // no algorithms
 </footer>
-
 <script>
 let currentUser = null;
 
+// ---------- AUTH FUNCTIONS ----------
 async function signup() {
-    await fetch("/api/signup", {
+    const res = await fetch("/api/signup", {
         method: "POST",
         headers: {"Content-Type":"application/json"},
         body: JSON.stringify({
@@ -227,7 +249,7 @@ async function signup() {
             pfp: pfp.value
         })
     });
-    alert("Registered. Log in.");
+    if (res.ok) alert("Registered! Please log in.");
 }
 
 async function login() {
@@ -242,6 +264,7 @@ async function login() {
     if (res.ok) loadMe();
 }
 
+// ---------- LOAD CURRENT USER ----------
 async function loadMe() {
     const res = await fetch("/api/me");
     currentUser = await res.json();
@@ -254,21 +277,25 @@ async function loadMe() {
     loadPosts();
 }
 
+// ---------- CREATE POST ----------
 async function createPost() {
     await fetch("/api/posts", {
         method: "POST",
         headers: {"Content-Type":"application/json"},
         body: JSON.stringify({
             title: postTitle.value,
-            body: postBody.value
+            body: postBody.value,
+            community: postCommunity.value
         })
     });
     postTitle.value = "";
     postBody.value = "";
+    postCommunity.value = "";
     loadPosts();
 }
 
-async function vote(id, value) {
+// ---------- VOTING ----------
+async function votePost(id, value) {
     await fetch("/api/vote", {
         method: "POST",
         headers: {"Content-Type":"application/json"},
@@ -277,65 +304,112 @@ async function vote(id, value) {
     loadPosts();
 }
 
-async function addComment(postId, inputId) {
-    await fetch("/api/comments", {
+async function voteComment(id, value) {
+    await fetch("/api/voteComment", {
         method: "POST",
         headers: {"Content-Type":"application/json"},
-        body: JSON.stringify({
-            post_id: postId,
-            body: document.getElementById(inputId).value
-        })
+        body: JSON.stringify({ comment_id: id, value })
     });
     loadPosts();
 }
 
+// ---------- ADD COMMENT ----------
+async function addComment(postId, inputId) {
+    const body = document.getElementById(inputId).value;
+    if (!body) return;
+    await fetch("/api/comments", {
+        method: "POST",
+        headers: {"Content-Type":"application/json"},
+        body: JSON.stringify({ post_id: postId, body })
+    });
+    loadPosts();
+}
+
+// ---------- MODERATOR ACTIONS ----------
+async function deletePost(postId) {
+    if (!confirm("Delete this post?")) return;
+    await fetch("/api/mod/deletePost", {
+        method: "POST",
+        headers: {"Content-Type":"application/json"},
+        body: JSON.stringify({ post_id: postId })
+    });
+    loadPosts();
+}
+
+async function deleteComment(commentId) {
+    if (!confirm("Delete this comment?")) return;
+    await fetch("/api/mod/deleteComment", {
+        method: "POST",
+        headers: {"Content-Type":"application/json"},
+        body: JSON.stringify({ comment_id: commentId })
+    });
+    loadPosts();
+}
+
+async function deleteUser(username) {
+    if (!confirm("Delete this user?")) return;
+    await fetch("/api/mod/deleteUser", {
+        method: "POST",
+        headers: {"Content-Type":"application/json"},
+        body: JSON.stringify({ username })
+    });
+    loadPosts();
+}
+
+// ---------- LOAD POSTS ----------
 async function loadPosts() {
     const res = await fetch("/api/posts");
     const posts = await res.json();
     feed.innerHTML = "";
 
-    for (const p of posts) {
-        const el = document.createElement("div");
-        el.className = "post";
-        el.innerHTML = `
-            <img class="pfp" src="${p.pfp || ""}">
+    posts.forEach(p => {
+        const postEl = document.createElement("div");
+        postEl.className = "post";
+
+        postEl.innerHTML = `
+            <img class="pfp" src="${p.pfp || ''}">
             <div class="postContent">
-                <div class="title">${p.title}</div>
-                <div class="meta">by ${p.username}</div>
+                <div class="title">${p.title}<span class="community">${p.community || ''}</span></div>
+                <div class="meta">by <a href="/u/${p.username}" class="profile-link">${p.username}</a></div>
                 <div>${p.body}</div>
                 <div class="actions">
-                    <button onclick="vote(${p.id},1)">▲</button>
-                    ${p.score}
-                    <button onclick="vote(${p.id},-1)">▼</button>
+                    <button onclick="votePost(${p.id},1)">▲</button>${p.score}<button onclick="votePost(${p.id},-1)">▼</button>
                     <button onclick="toggleComments(${p.id})">replies</button>
+                    ${currentUser?.username==='mod'? `<button class="moderator-btn" onclick="deletePost(${p.id})">MOD DEL</button>` : ''}
                 </div>
                 <div id="comments-${p.id}"></div>
             </div>
         `;
-        feed.appendChild(el);
-    }
+        feed.appendChild(postEl);
+    });
 }
 
-async function toggleComments(id) {
-    const box = document.getElementById("comments-" + id);
-    if (box.innerHTML) { box.innerHTML = ""; return; }
+// ---------- TOGGLE COMMENTS ----------
+async function toggleComments(postId) {
+    const container = document.getElementById("comments-" + postId);
+    if (container.innerHTML) { container.innerHTML=""; return; }
 
-    const res = await fetch("/api/comments/" + id);
+    const res = await fetch("/api/comments/" + postId);
     const comments = await res.json();
 
-    box.innerHTML =
-        comments.map(c => `
-            <div class="comment">
-                <img class="pfp" src="${c.pfp || ""}">
-                <b>${c.username}</b>: ${c.body}
+    container.innerHTML = comments.map(c => {
+        return `
+        <div class="comment">
+            <img class="pfp" src="${c.pfp || ''}">
+            <b>${c.username}</b>: ${c.body}
+            <div class="actions">
+                <button onclick="voteComment(${c.id},1)">▲</button>${c.score}<button onclick="voteComment(${c.id},-1)">▼</button>
+                ${currentUser?.username==='mod'? `<button class="moderator-btn" onclick="deleteComment(${c.id})">MOD DEL</button>` : ''}
             </div>
-        `).join("") +
-        `<input id="reply-${id}" placeholder="reply…">
-         <button onclick="addComment(${id},'reply-${id}')">send</button>`;
+            <input id="reply-${c.id}" placeholder="reply…">
+            <button onclick="addComment(${postId},'reply-${c.id}')">send</button>
+        </div>
+        `;
+    }).join('');
 }
 
+// ---------- INITIAL LOAD ----------
 loadMe();
 </script>
-
 </body>
 </html>
