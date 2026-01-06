@@ -4,8 +4,13 @@ const bodyParser = require("body-parser");
 const session = require("express-session");
 const sqlite3 = require("sqlite3").verbose();
 const path = require("path");
+const http = require("http");
+const { Server } = require("socket.io");
 
 const app = express();
+const server = http.createServer(app);
+const io = new Server(server);
+
 const PORT = process.env.PORT || 3000;
 
 // ------------------- Middleware -------------------
@@ -112,6 +117,12 @@ app.post("/api/posts", (req, res) => {
         [user.id, req.body.title, req.body.body],
         function(err) {
             if (err) return res.status(500).json({ error: "DB error" });
+
+            // Emit new post to all clients
+            db.get("SELECT posts.*, users.username, users.pfp FROM posts JOIN users ON posts.user_id = users.id WHERE posts.id = ?", [this.lastID], (err, post) => {
+                io.emit("newPost", post);
+            });
+
             res.json({ success: true });
         });
 });
@@ -134,16 +145,19 @@ app.post("/api/vote", (req, res) => {
 
     db.get("SELECT * FROM votes WHERE user_id = ? AND post_id = ?", [user.id, post_id], (err, vote) => {
         if (vote) {
-            // Already voted, update
             db.run("UPDATE votes SET value=? WHERE id=?", [value, vote.id]);
         } else {
             db.run("INSERT INTO votes (user_id, post_id, value) VALUES (?,?,?)", [user.id, post_id, value]);
         }
 
-        // Recalculate score
         db.get("SELECT SUM(value) AS score FROM votes WHERE post_id=?", [post_id], (err, row) => {
-            db.run("UPDATE posts SET score=? WHERE id=?", [row.score || 0, post_id]);
-            res.json({ success: true });
+            db.run("UPDATE posts SET score=? WHERE id=?", [row.score || 0, post_id], () => {
+                // Emit updated post score
+                db.get("SELECT posts.*, users.username, users.pfp FROM posts JOIN users ON posts.user_id = users.id WHERE posts.id = ?", [post_id], (err, post) => {
+                    io.emit("updatePost", post);
+                });
+                res.json({ success: true });
+            });
         });
     });
 });
@@ -157,6 +171,11 @@ app.post("/api/comments", (req, res) => {
         [req.body.post_id, user.id, req.body.body],
         function(err) {
             if (err) return res.status(500).json({ error: "DB error" });
+
+            db.get("SELECT comments.*, users.username, users.pfp FROM comments JOIN users ON comments.user_id = users.id WHERE comments.id = ?", [this.lastID], (err, comment) => {
+                io.emit("newComment", comment);
+            });
+
             res.json({ success: true });
         });
 });
@@ -181,11 +200,11 @@ app.post("/api/terminate/:username", (req, res) => {
     db.get("SELECT * FROM users WHERE username = ?", [username], (err, user) => {
         if (!user) return res.status(404).json({ error: "User not found" });
 
-        // Mark as terminated
         db.run("UPDATE users SET terminated = 1 WHERE id = ?", [user.id]);
-        // Delete all posts/comments
         db.run("DELETE FROM posts WHERE user_id = ?", [user.id]);
         db.run("DELETE FROM comments WHERE user_id = ?", [user.id]);
+
+        io.emit("userTerminated", username);
 
         res.json({ success: true });
     });
@@ -212,5 +231,11 @@ app.get("/api/user/:username", (req, res) => {
     });
 });
 
+// ------------------- Socket.IO -------------------
+io.on("connection", (socket) => {
+    console.log("User connected");
+    socket.on("disconnect", () => console.log("User disconnected"));
+});
+
 // ------------------- Start Server -------------------
-app.listen(PORT, () => console.log(`XSWARM server running on port ${PORT}`));
+server.listen(PORT, () => console.log(`XSWARM server running on port ${PORT}`));

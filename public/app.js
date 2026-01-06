@@ -1,3 +1,4 @@
+const socket = io();
 let currentUser = null;
 
 // ------------------- Auth -------------------
@@ -45,6 +46,7 @@ async function login() {
     if (res.ok) loadMe();
 }
 
+// ------------------- Load Current User -------------------
 async function loadMe() {
     const res = await fetch("/api/me");
     currentUser = await res.json();
@@ -53,27 +55,30 @@ async function loadMe() {
         auth.style.display = "none";
         postBox.style.display = "block";
         userStatus.innerHTML = `logged in as <b>${currentUser.username}</b>`;
-
-        if (currentUser.isMod) {
-            modNotice.style.display = "block";
-        }
+        if (currentUser.isMod) modNotice.style.display = "block";
     }
-    loadPosts();
+
+    // Initial fetch of existing posts
+    const postsRes = await fetch("/api/posts");
+    const posts = await postsRes.json();
+    feed.innerHTML = "";
+    posts.reverse().forEach(renderPost);
 }
 
 // ------------------- Posts -------------------
 async function createPost() {
+    const title = postTitle.value;
+    const body = postBody.value;
+    if (!title && !body) return;
+
     await fetch("/api/posts", {
         method: "POST",
         headers: {"Content-Type":"application/json"},
-        body: JSON.stringify({
-            title: postTitle.value,
-            body: postBody.value
-        })
+        body: JSON.stringify({ title, body })
     });
+
     postTitle.value = "";
     postBody.value = "";
-    loadPosts();
 }
 
 async function vote(id, value) {
@@ -82,7 +87,6 @@ async function vote(id, value) {
         headers: {"Content-Type":"application/json"},
         body: JSON.stringify({ post_id: id, value })
     });
-    loadPosts();
 }
 
 // ------------------- Comments -------------------
@@ -93,13 +97,9 @@ async function addComment(postId, inputId) {
     await fetch("/api/comments", {
         method: "POST",
         headers: {"Content-Type":"application/json"},
-        body: JSON.stringify({
-            post_id: postId,
-            body: input.value
-        })
+        body: JSON.stringify({ post_id: postId, body: input.value })
     });
     input.value = "";
-    loadPosts();
 }
 
 async function toggleComments(id) {
@@ -120,33 +120,43 @@ async function toggleComments(id) {
          <button onclick="addComment(${id},'reply-${id}')">send</button>`;
 }
 
-// ------------------- Load Posts -------------------
-async function loadPosts() {
-    const res = await fetch("/api/posts");
-    const posts = await res.json();
-    feed.innerHTML = "";
-
-    for (const p of posts) {
-        const el = document.createElement("div");
+// ------------------- Render Post -------------------
+function renderPost(p) {
+    let el = document.getElementById("post-" + p.id);
+    if (!el) {
+        el = document.createElement("div");
+        el.id = "post-" + p.id;
         el.className = "post";
-        el.innerHTML = `
-            <img class="pfp" src="${p.pfp || ""}">
-            <div class="postContent">
-                <div class="title">${p.title}</div>
-                <div class="meta">by ${p.username}</div>
-                <div>${p.body}</div>
-                <div class="actions">
-                    <button onclick="vote(${p.id},1)">▲</button>
-                    ${p.score || 0}
-                    <button onclick="vote(${p.id},-1)">▼</button>
-                    <button onclick="toggleComments(${p.id})">replies</button>
-                    ${currentUser?.isMod ? `<button onclick="terminateUser('${p.username}')">terminate user</button>` : ""}
-                </div>
-                <div id="comments-${p.id}"></div>
-            </div>
-        `;
-        feed.appendChild(el);
+        feed.prepend(el); // newest on top
     }
+
+    el.innerHTML = `
+        <img class="pfp" src="${p.pfp || ""}">
+        <div class="postContent">
+            <div class="title">${p.title}</div>
+            <div class="meta">by ${p.username}</div>
+            <div>${p.body}</div>
+            <div class="actions">
+                <button onclick="vote(${p.id},1)">▲</button>
+                ${p.score || 0}
+                <button onclick="vote(${p.id},-1)">▼</button>
+                <button onclick="toggleComments(${p.id})">replies</button>
+                ${currentUser?.isMod ? `<button onclick="terminateUser('${p.username}')">terminate user</button>` : ""}
+            </div>
+            <div id="comments-${p.id}"></div>
+        </div>
+    `;
+}
+
+// ------------------- Render Comment -------------------
+function renderComment(c) {
+    const box = document.getElementById("comments-" + c.post_id);
+    if (!box) return;
+
+    const div = document.createElement("div");
+    div.className = "comment";
+    div.innerHTML = `<img class="pfp" src="${c.pfp || ""}"><b>${c.username}</b>: ${c.body}`;
+    box.appendChild(div);
 }
 
 // ------------------- Moderator: Terminate User -------------------
@@ -154,9 +164,19 @@ async function terminateUser(username) {
     if (!confirm(`Are you sure you want to terminate ${username}?`)) return;
 
     await fetch("/api/terminate/" + username, { method: "POST" });
-    alert(`${username} has been terminated.`);
-    loadPosts();
 }
 
-// ------------------- Load -------------------
+// ------------------- Socket.IO Events -------------------
+socket.on("newPost", renderPost);
+socket.on("updatePost", renderPost);
+socket.on("newComment", renderComment);
+socket.on("userTerminated", username => {
+    // Remove posts by terminated user
+    const posts = document.querySelectorAll(".post");
+    posts.forEach(p => {
+        if (p.querySelector(".meta").textContent.includes(username)) p.remove();
+    });
+});
+
+// ------------------- Initialize -------------------
 loadMe();
