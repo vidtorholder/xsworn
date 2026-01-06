@@ -1,247 +1,216 @@
-const express = require('express');
-const session = require('express-session');
-const bodyParser = require('body-parser');
-const sqlite3 = require('sqlite3').verbose();
-const path = require('path');
+// ------------------- Imports -------------------
+const express = require("express");
+const bodyParser = require("body-parser");
+const session = require("express-session");
+const sqlite3 = require("sqlite3").verbose();
+const path = require("path");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// ---------- DATABASE ----------
-const db = new sqlite3.Database('./db.sqlite');
-
-db.serialize(() => {
-    // Users
-    db.run(`CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        username TEXT UNIQUE,
-        password TEXT,
-        pfp TEXT
-    )`);
-
-    // Posts
-    db.run(`CREATE TABLE IF NOT EXISTS posts (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
-        title TEXT,
-        body TEXT,
-        community TEXT,
-        score INTEGER DEFAULT 0,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY(user_id) REFERENCES users(id)
-    )`);
-
-    // Comments
-    db.run(`CREATE TABLE IF NOT EXISTS comments (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        post_id INTEGER,
-        user_id INTEGER,
-        parent_id INTEGER,
-        body TEXT,
-        score INTEGER DEFAULT 0,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY(post_id) REFERENCES posts(id),
-        FOREIGN KEY(user_id) REFERENCES users(id)
-    )`);
-
-    // Votes
-    db.run(`CREATE TABLE IF NOT EXISTS votes (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
-        post_id INTEGER,
-        value INTEGER,
-        UNIQUE(user_id, post_id)
-    )`);
-
-    db.run(`CREATE TABLE IF NOT EXISTS comment_votes (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
-        comment_id INTEGER,
-        value INTEGER,
-        UNIQUE(user_id, comment_id)
-    )`);
-
-    // ---------- CREATE MOD ACCOUNT ----------
-    db.get(`SELECT * FROM users WHERE username = ?`, ['mod'], (err, row) => {
-        if (err) return console.error(err);
-        if (!row) {
-            db.run(`INSERT INTO users (username, password, pfp) VALUES (?, ?, ?)`,
-                ['mod', '24231803moderation', 'https://example.com/mod.png'],
-                err => {
-                    if (err) console.error(err);
-                    else console.log('Moderator account "mod" created.');
-                }
-            );
-        } else {
-            console.log('Moderator account "mod" already exists.');
-        }
-    });
-});
-
-// ---------- MIDDLEWARE ----------
+// ------------------- Middleware -------------------
 app.use(bodyParser.json());
+app.use(express.static(path.join(__dirname, "public")));
 app.use(session({
-    secret: 'xswarm-secret',
+    secret: "xswarm-secret-key",
     resave: false,
     saveUninitialized: true
 }));
-app.use(express.static(path.join(__dirname, 'public')));
 
-// ---------- AUTH ROUTES ----------
-app.post('/api/signup', (req, res) => {
+// ------------------- Database -------------------
+const db = new sqlite3.Database("db.sqlite");
+
+// Users table
+db.run(`CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT UNIQUE,
+    password TEXT,
+    pfp TEXT,
+    terminated INTEGER DEFAULT 0
+)`);
+
+// Posts table
+db.run(`CREATE TABLE IF NOT EXISTS posts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    title TEXT,
+    body TEXT,
+    score INTEGER DEFAULT 0
+)`);
+
+// Comments table
+db.run(`CREATE TABLE IF NOT EXISTS comments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    post_id INTEGER,
+    user_id INTEGER,
+    body TEXT
+)`);
+
+// Votes table
+db.run(`CREATE TABLE IF NOT EXISTS votes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    post_id INTEGER,
+    value INTEGER
+)`);
+
+// ------------------- Signup -------------------
+app.post("/api/signup", (req, res) => {
     const { username, password, pfp } = req.body;
-    if (!username || !password) return res.sendStatus(400);
-    db.run(`INSERT INTO users (username, password, pfp) VALUES (?, ?, ?)`,
-        [username, password, pfp || ''],
-        function(err) {
-            if (err) return res.sendStatus(400);
-            res.sendStatus(200);
-        });
+
+    db.get("SELECT * FROM users WHERE username = ?", [username], (err, user) => {
+        if (user && user.terminated) {
+            return res.status(403).json({
+                terminated: true,
+                message: "Your account was terminated and cannot be recreated."
+            });
+        }
+        if (user) return res.status(400).json({ error: "Username taken" });
+
+        db.run("INSERT INTO users (username, password, pfp) VALUES (?,?,?)",
+            [username, password, pfp],
+            function(err) {
+                if (err) return res.status(500).json({ error: "DB error" });
+                res.json({ success: true });
+            });
+    });
 });
 
-app.post('/api/login', (req, res) => {
+// ------------------- Login -------------------
+app.post("/api/login", (req, res) => {
     const { username, password } = req.body;
-    db.get(`SELECT * FROM users WHERE username = ? AND password = ?`, [username, password], (err, row) => {
-        if (err || !row) return res.sendStatus(401);
-        req.session.userId = row.id;
-        res.sendStatus(200);
+
+    db.get("SELECT * FROM users WHERE username = ?", [username], (err, user) => {
+        if (!user) return res.status(401).json({ error: "User not found" });
+
+        if (user.terminated) {
+            return res.status(403).json({
+                terminated: true,
+                message: "Your account has been terminated."
+            });
+        }
+
+        if (user.password !== password) return res.status(401).json({ error: "Wrong password" });
+
+        req.session.user = { id: user.id, username: user.username, isMod: user.username === "mod" };
+        res.json(req.session.user);
     });
 });
 
-app.get('/api/me', (req, res) => {
-    if (!req.session.userId) return res.json(null);
-    db.get(`SELECT * FROM users WHERE id = ?`, [req.session.userId], (err, row) => {
-        if (err) return res.json(null);
-        res.json({ username: row.username, pfp: row.pfp });
+// ------------------- Get Current User -------------------
+app.get("/api/me", (req, res) => {
+    if (!req.session.user) return res.json(null);
+    res.json(req.session.user);
+});
+
+// ------------------- Create Post -------------------
+app.post("/api/posts", (req, res) => {
+    const user = req.session.user;
+    if (!user) return res.status(401).json({ error: "Not logged in" });
+
+    db.run("INSERT INTO posts (user_id, title, body) VALUES (?,?,?)",
+        [user.id, req.body.title, req.body.body],
+        function(err) {
+            if (err) return res.status(500).json({ error: "DB error" });
+            res.json({ success: true });
+        });
+});
+
+// ------------------- Get Posts -------------------
+app.get("/api/posts", (req, res) => {
+    db.all(`SELECT posts.*, users.username, users.pfp 
+            FROM posts JOIN users ON posts.user_id = users.id
+            ORDER BY posts.id DESC`, [], (err, posts) => {
+        res.json(posts);
     });
 });
 
-// ---------- POSTS ----------
-app.post('/api/posts', (req, res) => {
-    if (!req.session.userId) return res.sendStatus(401);
-    const { title, body, community } = req.body;
-    db.run(`INSERT INTO posts (user_id, title, body, community) VALUES (?, ?, ?, ?)`,
-        [req.session.userId, title, body, community || ''],
-        function(err) { if (err) return res.sendStatus(400); res.sendStatus(200); });
-});
+// ------------------- Vote -------------------
+app.post("/api/vote", (req, res) => {
+    const user = req.session.user;
+    if (!user) return res.status(401).json({ error: "Not logged in" });
 
-app.get('/api/posts', (req, res) => {
-    db.all(`
-        SELECT posts.*, users.username, users.pfp,
-            COALESCE(SUM(votes.value),0) as score
-        FROM posts
-        LEFT JOIN users ON posts.user_id = users.id
-        LEFT JOIN votes ON posts.id = votes.post_id
-        GROUP BY posts.id
-        ORDER BY created_at DESC
-    `, [], (err, rows) => {
-        if (err) return res.json([]);
-        res.json(rows);
-    });
-});
-
-// ---------- VOTES ----------
-app.post('/api/vote', (req, res) => {
-    if (!req.session.userId) return res.sendStatus(401);
     const { post_id, value } = req.body;
-    db.run(`
-        INSERT INTO votes (user_id, post_id, value)
-        VALUES (?, ?, ?)
-        ON CONFLICT(user_id, post_id) DO UPDATE SET value=excluded.value
-    `, [req.session.userId, post_id, value], err => {
-        if (err) return res.sendStatus(400);
-        res.sendStatus(200);
-    });
-});
 
-app.post('/api/voteComment', (req, res) => {
-    if (!req.session.userId) return res.sendStatus(401);
-    const { comment_id, value } = req.body;
-    db.run(`
-        INSERT INTO comment_votes (user_id, comment_id, value)
-        VALUES (?, ?, ?)
-        ON CONFLICT(user_id, comment_id) DO UPDATE SET value=excluded.value
-    `, [req.session.userId, comment_id, value], err => {
-        if (err) return res.sendStatus(400);
-        res.sendStatus(200);
-    });
-});
+    db.get("SELECT * FROM votes WHERE user_id = ? AND post_id = ?", [user.id, post_id], (err, vote) => {
+        if (vote) {
+            // Already voted, update
+            db.run("UPDATE votes SET value=? WHERE id=?", [value, vote.id]);
+        } else {
+            db.run("INSERT INTO votes (user_id, post_id, value) VALUES (?,?,?)", [user.id, post_id, value]);
+        }
 
-// ---------- COMMENTS ----------
-app.post('/api/comments', (req, res) => {
-    if (!req.session.userId) return res.sendStatus(401);
-    const { post_id, parent_id, body } = req.body;
-    db.run(`INSERT INTO comments (post_id, user_id, parent_id, body) VALUES (?, ?, ?, ?)`,
-        [post_id, req.session.userId, parent_id || null, body],
-        err => { if (err) return res.sendStatus(400); res.sendStatus(200); });
-});
-
-app.get('/api/comments/:postId', (req, res) => {
-    const postId = req.params.postId;
-    const parentId = req.query.parent_id || null;
-    db.all(`
-        SELECT comments.*, users.username, users.pfp,
-            COALESCE(SUM(comment_votes.value),0) as score
-        FROM comments
-        LEFT JOIN users ON comments.user_id = users.id
-        LEFT JOIN comment_votes ON comments.id = comment_votes.comment_id
-        WHERE comments.post_id = ? AND comments.parent_id IS ?
-        GROUP BY comments.id
-        ORDER BY created_at ASC
-    `, [postId, parentId], (err, rows) => {
-        if (err) return res.json([]);
-        res.json(rows);
-    });
-});
-
-// ---------- MOD ACTIONS ----------
-function requireMod(req, res, next) {
-    if (!req.session.userId) return res.sendStatus(401);
-    db.get(`SELECT username FROM users WHERE id = ?`, [req.session.userId], (err, row) => {
-        if (err || row.username !== 'mod') return res.sendStatus(403);
-        next();
-    });
-}
-
-app.post('/api/mod/deletePost', requireMod, (req, res) => {
-    db.run(`DELETE FROM posts WHERE id = ?`, [req.body.post_id], err => {
-        if (err) return res.sendStatus(400);
-        res.sendStatus(200);
-    });
-});
-
-app.post('/api/mod/deleteComment', requireMod, (req, res) => {
-    db.run(`DELETE FROM comments WHERE id = ?`, [req.body.comment_id], err => {
-        if (err) return res.sendStatus(400);
-        res.sendStatus(200);
-    });
-});
-
-app.post('/api/mod/deleteUser', requireMod, (req, res) => {
-    db.run(`DELETE FROM users WHERE username = ?`, [req.body.username], err => {
-        if (err) return res.sendStatus(400);
-        res.sendStatus(200);
-    });
-});
-
-// ---------- PROFILE PAGE ----------
-app.get('/u/:username', (req, res) => {
-    const uname = req.params.username;
-    db.get(`SELECT * FROM users WHERE username = ?`, [uname], (err, row) => {
-        if (err || !row) return res.status(404).send('User does not exist');
-        db.all(`SELECT posts.*, COALESCE(SUM(votes.value),0) as score
-                FROM posts
-                LEFT JOIN votes ON posts.id = votes.post_id
-                WHERE posts.user_id = ?
-                GROUP BY posts.id
-                ORDER BY created_at DESC`, [row.id], (err2, posts) => {
-            if (err2) return res.status(500).send('Error loading posts');
-            res.json({ username: row.username, pfp: row.pfp, posts });
+        // Recalculate score
+        db.get("SELECT SUM(value) AS score FROM votes WHERE post_id=?", [post_id], (err, row) => {
+            db.run("UPDATE posts SET score=? WHERE id=?", [row.score || 0, post_id]);
+            res.json({ success: true });
         });
     });
 });
 
-// ---------- START SERVER ----------
-app.listen(PORT, () => {
-    console.log(`XSWARM server running on http://localhost:${PORT}`);
+// ------------------- Add Comment -------------------
+app.post("/api/comments", (req, res) => {
+    const user = req.session.user;
+    if (!user) return res.status(401).json({ error: "Not logged in" });
+
+    db.run("INSERT INTO comments (post_id, user_id, body) VALUES (?,?,?)",
+        [req.body.post_id, user.id, req.body.body],
+        function(err) {
+            if (err) return res.status(500).json({ error: "DB error" });
+            res.json({ success: true });
+        });
 });
+
+// ------------------- Get Comments -------------------
+app.get("/api/comments/:post_id", (req, res) => {
+    const post_id = req.params.post_id;
+    db.all(`SELECT comments.*, users.username, users.pfp 
+            FROM comments JOIN users ON comments.user_id = users.id
+            WHERE post_id = ? ORDER BY comments.id ASC`, [post_id], (err, comments) => {
+        res.json(comments);
+    });
+});
+
+// ------------------- Moderator: Terminate User -------------------
+app.post("/api/terminate/:username", (req, res) => {
+    const mod = req.session.user;
+    if (!mod || mod.username !== "mod") return res.status(403).json({ error: "Unauthorized" });
+
+    const username = req.params.username;
+
+    db.get("SELECT * FROM users WHERE username = ?", [username], (err, user) => {
+        if (!user) return res.status(404).json({ error: "User not found" });
+
+        // Mark as terminated
+        db.run("UPDATE users SET terminated = 1 WHERE id = ?", [user.id]);
+        // Delete all posts/comments
+        db.run("DELETE FROM posts WHERE user_id = ?", [user.id]);
+        db.run("DELETE FROM comments WHERE user_id = ?", [user.id]);
+
+        res.json({ success: true });
+    });
+});
+
+// ------------------- Get User Profile -------------------
+app.get("/api/user/:username", (req, res) => {
+    const username = req.params.username;
+
+    db.get("SELECT * FROM users WHERE username = ?", [username], (err, user) => {
+        if (!user) return res.status(404).json({ username: "User not found", posts: [] });
+
+        if (user.terminated) {
+            return res.json({
+                username: "Account Deleted",
+                pfp: "",
+                posts: []
+            });
+        }
+
+        db.all("SELECT * FROM posts WHERE user_id = ?", [user.id], (err, posts) => {
+            res.json({ username: user.username, pfp: user.pfp, posts });
+        });
+    });
+});
+
+// ------------------- Start Server -------------------
+app.listen(PORT, () => console.log(`XSWARM server running on port ${PORT}`));

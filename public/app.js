@@ -1,17 +1,23 @@
 let currentUser = null;
 
-// ---------- AUTH ----------
+// ------------------- Auth -------------------
 async function signup() {
     const res = await fetch("/api/signup", {
         method: "POST",
         headers: {"Content-Type":"application/json"},
         body: JSON.stringify({
-            username: document.getElementById("username").value,
-            password: document.getElementById("password").value,
-            pfp: document.getElementById("pfp").value
+            username: username.value,
+            password: password.value,
+            pfp: pfp.value
         })
     });
-    if (res.ok) alert("Registered! Log in.");
+
+    const data = await res.json();
+    if (data.terminated) {
+        alert("This account has been terminated and cannot be recreated.");
+        return;
+    }
+    if (res.ok) alert("Registered. Log in.");
 }
 
 async function login() {
@@ -19,44 +25,58 @@ async function login() {
         method: "POST",
         headers: {"Content-Type":"application/json"},
         body: JSON.stringify({
-            username: document.getElementById("username").value,
-            password: document.getElementById("password").value
+            username: username.value,
+            password: password.value
         })
     });
+
+    const data = await res.json();
+
+    if (data.terminated) {
+        document.body.innerHTML = `
+            <div style="padding:50px;text-align:center;">
+                <h1>Account Terminated</h1>
+                <p>We are very sorry but our moderators have decided your actions are not in regards of our terms of service, your account has been terminated.</p>
+            </div>
+        `;
+        return;
+    }
+
     if (res.ok) loadMe();
 }
 
 async function loadMe() {
     const res = await fetch("/api/me");
     currentUser = await res.json();
+
     if (currentUser) {
-        document.getElementById("auth").style.display = "none";
-        document.getElementById("postBox").style.display = "block";
-        document.getElementById("userStatus").innerHTML = `logged in as <b>${currentUser.username}</b>`;
+        auth.style.display = "none";
+        postBox.style.display = "block";
+        userStatus.innerHTML = `logged in as <b>${currentUser.username}</b>`;
+
+        if (currentUser.isMod) {
+            modNotice.style.display = "block";
+        }
     }
     loadPosts();
 }
 
-// ---------- CREATE POST ----------
+// ------------------- Posts -------------------
 async function createPost() {
-    const title = document.getElementById("postTitle").value;
-    const body = document.getElementById("postBody").value;
-    const community = document.getElementById("postCommunity").value;
-
     await fetch("/api/posts", {
         method: "POST",
         headers: {"Content-Type":"application/json"},
-        body: JSON.stringify({ title, body, community })
+        body: JSON.stringify({
+            title: postTitle.value,
+            body: postBody.value
+        })
     });
-
-    document.getElementById("postTitle").value = "";
-    document.getElementById("postBody").value = "";
-    document.getElementById("postCommunity").value = "";
+    postTitle.value = "";
+    postBody.value = "";
     loadPosts();
 }
 
-// ---------- VOTING ----------
-async function votePost(id, value) {
+async function vote(id, value) {
     await fetch("/api/vote", {
         method: "POST",
         headers: {"Content-Type":"application/json"},
@@ -65,119 +85,78 @@ async function votePost(id, value) {
     loadPosts();
 }
 
-async function voteComment(id, value) {
-    await fetch("/api/voteComment", {
-        method: "POST",
-        headers: {"Content-Type":"application/json"},
-        body: JSON.stringify({ comment_id: id, value })
-    });
-    loadPosts();
-}
+// ------------------- Comments -------------------
+async function addComment(postId, inputId) {
+    const input = document.getElementById(inputId);
+    if (!input.value) return;
 
-// ---------- COMMENTS ----------
-async function addComment(postId, parentId, inputId) {
-    const body = document.getElementById(inputId).value;
-    if (!body) return;
     await fetch("/api/comments", {
         method: "POST",
         headers: {"Content-Type":"application/json"},
-        body: JSON.stringify({ post_id: postId, parent_id: parentId, body })
+        body: JSON.stringify({
+            post_id: postId,
+            body: input.value
+        })
     });
+    input.value = "";
     loadPosts();
 }
 
-// ---------- MODERATOR ----------
-async function deletePost(postId) {
-    if (!confirm("Delete this post?")) return;
-    await fetch("/api/mod/deletePost", {
-        method: "POST",
-        headers: {"Content-Type":"application/json"},
-        body: JSON.stringify({ post_id: postId })
-    });
-    loadPosts();
+async function toggleComments(id) {
+    const box = document.getElementById("comments-" + id);
+    if (box.innerHTML) { box.innerHTML = ""; return; }
+
+    const res = await fetch("/api/comments/" + id);
+    const comments = await res.json();
+
+    box.innerHTML =
+        comments.map(c => `
+            <div class="comment">
+                <img class="pfp" src="${c.pfp || ""}">
+                <b>${c.username}</b>: ${c.body}
+            </div>
+        `).join("") +
+        `<input id="reply-${id}" placeholder="reply…">
+         <button onclick="addComment(${id},'reply-${id}')">send</button>`;
 }
 
-async function deleteComment(commentId) {
-    if (!confirm("Delete this comment?")) return;
-    await fetch("/api/mod/deleteComment", {
-        method: "POST",
-        headers: {"Content-Type":"application/json"},
-        body: JSON.stringify({ comment_id: commentId })
-    });
-    loadPosts();
-}
-
-async function deleteUser(username) {
-    if (!confirm("Delete user?")) return;
-    await fetch("/api/mod/deleteUser", {
-        method: "POST",
-        headers: {"Content-Type":"application/json"},
-        body: JSON.stringify({ username })
-    });
-    loadPosts();
-}
-
-// ---------- LOAD POSTS & COMMENTS ----------
+// ------------------- Load Posts -------------------
 async function loadPosts() {
     const res = await fetch("/api/posts");
     const posts = await res.json();
-    const feed = document.getElementById("feed");
     feed.innerHTML = "";
 
-    posts.forEach(p => {
-        const postEl = document.createElement("div");
-        postEl.className = "post";
-        postEl.innerHTML = `
-            <img class="pfp" src="${p.pfp || ''}">
+    for (const p of posts) {
+        const el = document.createElement("div");
+        el.className = "post";
+        el.innerHTML = `
+            <img class="pfp" src="${p.pfp || ""}">
             <div class="postContent">
-                <div class="title">${p.title} ${p.community? `<span class="community">${p.community}</span>` : ''}</div>
-                <div class="meta">by <a href="/u/${p.username}" class="profile-link">${p.username}</a></div>
+                <div class="title">${p.title}</div>
+                <div class="meta">by ${p.username}</div>
                 <div>${p.body}</div>
                 <div class="actions">
-                    <button onclick="votePost(${p.id},1)">▲</button>${p.score}<button onclick="votePost(${p.id},-1)">▼</button>
+                    <button onclick="vote(${p.id},1)">▲</button>
+                    ${p.score || 0}
+                    <button onclick="vote(${p.id},-1)">▼</button>
                     <button onclick="toggleComments(${p.id})">replies</button>
-                    ${currentUser?.username==='mod'? `<button class="moderator-btn" onclick="deletePost(${p.id})">MOD DEL</button>` : ''}
+                    ${currentUser?.isMod ? `<button onclick="terminateUser('${p.username}')">terminate user</button>` : ""}
                 </div>
-                <div id="comments-${p.id}" class="comment-container"></div>
+                <div id="comments-${p.id}"></div>
             </div>
         `;
-        feed.appendChild(postEl);
-    });
+        feed.appendChild(el);
+    }
 }
 
-// ---------- RECURSIVE COMMENTS ----------
-async function renderComments(postId, parentId = null) {
-    const res = await fetch(`/api/comments/${postId}?parent_id=${parentId || ''}`);
-    const comments = await res.json();
-    const container = parentId ? document.getElementById(`comment-${parentId}`) : document.getElementById(`comments-${postId}`);
+// ------------------- Moderator: Terminate User -------------------
+async function terminateUser(username) {
+    if (!confirm(`Are you sure you want to terminate ${username}?`)) return;
 
-    container.innerHTML = '';
-    comments.forEach(c => {
-        const cEl = document.createElement("div");
-        cEl.className = "comment";
-        cEl.id = `comment-${c.id}`;
-        cEl.innerHTML = `
-            <img class="pfp" src="${c.pfp || ''}">
-            <b><a href="/u/${c.username}" class="profile-link">${c.username}</a></b>: ${c.body}
-            <div class="actions">
-                <button onclick="voteComment(${c.id},1)">▲</button>${c.score}<button onclick="voteComment(${c.id},-1)">▼</button>
-                ${currentUser?.username==='mod'? `<button class="moderator-btn" onclick="deleteComment(${c.id})">MOD DEL</button>` : ''}
-            </div>
-            <input id="reply-${c.id}" placeholder="reply…">
-            <button onclick="addComment(${postId},${c.id},'reply-${c.id}')">send</button>
-            <div class="comment-container" id="comments-${c.id}"></div>
-        `;
-        container.appendChild(cEl);
-        renderComments(postId, c.id); // recursive
-    });
+    await fetch("/api/terminate/" + username, { method: "POST" });
+    alert(`${username} has been terminated.`);
+    loadPosts();
 }
 
-// ---------- TOGGLE COMMENTS ----------
-function toggleComments(postId) {
-    const container = document.getElementById(`comments-${postId}`);
-    if (container.innerHTML) { container.innerHTML = ''; return; }
-    renderComments(postId);
-}
-
-// ---------- INITIAL LOAD ----------
+// ------------------- Load -------------------
 loadMe();
